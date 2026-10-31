@@ -18,13 +18,19 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      # uzywa wrappera (gradlew), a jesli go nie ma - najnowszego Gradle
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: ${{ hashFiles('gradlew') != '' && 'wrapper' || 'current' }}
+          gradle-version: current
+
+      - name: Znajdz projekt
+        run: |
+          F=$(find . -name settings.gradle -not -path './.git/*' | head -n1)
+          if [ -z "$F" ]; then echo "Brak settings.gradle w repo - wrzuc pliki moda (nie zip)!"; exit 1; fi
+          echo "PROJ=$(dirname "$F")" >> $GITHUB_ENV
 
       - name: Build
+        working-directory: ${{ env.PROJ }}
         run: |
           if [ -f ./gradlew ]; then chmod +x ./gradlew && ./gradlew build; else gradle build; fi
 
@@ -32,4 +38,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: chestsmp-tools
-          path: build/libs/*.jar
+          path: ${{ env.PROJ }}/build/libs/*.jar
