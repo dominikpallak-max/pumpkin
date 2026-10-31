@@ -2,7 +2,6 @@ name: build
 
 on:
   push:
-  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -26,8 +25,402 @@ jobs:
       - name: Znajdz projekt
         run: |
           F=$(find . -name settings.gradle -not -path './.git/*' | head -n1)
-          if [ -z "$F" ]; then echo "Brak settings.gradle w repo - wrzuc pliki moda (nie zip)!"; exit 1; fi
+          if [ -z "$F" ]; then echo "Brak settings.gradle w repo"; exit 1; fi
           echo "PROJ=$(dirname "$F")" >> $GITHUB_ENV
+
+      - name: Utworz pliki moda
+        run: |
+          mkdir -p "$PROJ/src/main/java/pl/pumpkin" "$PROJ/src/main/resources"
+
+          cat > "$PROJ/src/main/resources/fabric.mod.json" <<'EOF_MOD'
+          {
+            "schemaVersion": 1,
+            "id": "chestsmp_tools",
+            "version": "${version}",
+            "name": "Chest SMP Tools",
+            "description": "/pumpkin - menu: tracery + killaura na interaction.",
+            "authors": ["Chest SMP"],
+            "environment": "client",
+            "entrypoints": {
+              "client": ["pl.pumpkin.PumpkinMod"]
+            },
+            "depends": {
+              "fabricloader": ">=0.18.0",
+              "minecraft": "~1.21.11",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF_MOD
+
+          cat > "$PROJ/src/main/java/pl/pumpkin/PumpkinMod.java" <<'EOF_JAVA'
+          package pl.pumpkin;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+          import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.loader.api.FabricLoader;
+          import net.minecraft.client.MinecraftClient;
+
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import java.util.Properties;
+
+          public class PumpkinMod implements ClientModInitializer {
+
+          	public static boolean tracers = false;
+          	public static float thickness = 1.0f;
+          	public static String targetName = "Niespodzianka";
+
+          	public static boolean killaura = false;
+          	public static float kaRange = 3.0f;
+          	public static int kaDelay = 5;
+          	public static String kaName = "";
+
+          	private static final Path CONFIG = FabricLoader.getInstance().getConfigDir().resolve("chestsmp_tools.properties");
+
+          	@Override
+          	public void onInitializeClient() {
+          		loadConfig();
+
+          		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
+          			dispatcher.register(ClientCommandManager.literal("pumpkin")
+          				.executes(ctx -> {
+          					MinecraftClient mc = MinecraftClient.getInstance();
+          					mc.send(() -> mc.setScreen(new PumpkinScreen()));
+          					return 1;
+          				})));
+
+          		ClientTickEvents.END_CLIENT_TICK.register(KillAura::tick);
+          		TracerRenderer.init();
+          	}
+
+          	private static void loadConfig() {
+          		if (!Files.exists(CONFIG)) return;
+          		try (InputStream in = Files.newInputStream(CONFIG)) {
+          			Properties p = new Properties();
+          			p.load(in);
+          			tracers = Boolean.parseBoolean(p.getProperty("tracers", "false"));
+          			thickness = Float.parseFloat(p.getProperty("thickness", "1.0"));
+          			targetName = p.getProperty("name", "Niespodzianka");
+          			killaura = Boolean.parseBoolean(p.getProperty("killaura", "false"));
+          			kaRange = Float.parseFloat(p.getProperty("ka_range", "3.0"));
+          			kaDelay = Integer.parseInt(p.getProperty("ka_delay", "5"));
+          			kaName = p.getProperty("ka_name", "");
+          		} catch (IOException | NumberFormatException ignored) {
+          		}
+          	}
+
+          	public static void saveConfig() {
+          		Properties p = new Properties();
+          		p.setProperty("tracers", String.valueOf(tracers));
+          		p.setProperty("thickness", String.valueOf(thickness));
+          		p.setProperty("name", targetName);
+          		p.setProperty("killaura", String.valueOf(killaura));
+          		p.setProperty("ka_range", String.valueOf(kaRange));
+          		p.setProperty("ka_delay", String.valueOf(kaDelay));
+          		p.setProperty("ka_name", kaName);
+          		try (OutputStream out = Files.newOutputStream(CONFIG)) {
+          			p.store(out, "Chest SMP Tools");
+          		} catch (IOException ignored) {
+          		}
+          	}
+          }
+          EOF_JAVA
+
+          cat > "$PROJ/src/main/java/pl/pumpkin/KillAura.java" <<'EOF_JAVA'
+          package pl.pumpkin;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.entity.Entity;
+          import net.minecraft.entity.decoration.InteractionEntity;
+          import net.minecraft.util.Hand;
+          import net.minecraft.util.math.Box;
+          import net.minecraft.util.math.Vec3d;
+
+          import java.util.Locale;
+
+          public final class KillAura {
+
+          	private static int cooldown = 0;
+
+          	private KillAura() {}
+
+          	public static void tick(MinecraftClient mc) {
+          		if (!PumpkinMod.killaura) return;
+          		ClientPlayerEntity player = mc.player;
+          		if (player == null || mc.world == null || mc.interactionManager == null) return;
+          		if (!player.isAlive() || player.isSpectator()) return;
+
+          		if (cooldown > 0) {
+          			cooldown--;
+          			return;
+          		}
+
+          		Vec3d eye = player.getEyePos();
+          		double maxSq = (double) PumpkinMod.kaRange * PumpkinMod.kaRange;
+          		String filter = PumpkinMod.kaName.trim().toLowerCase(Locale.ROOT);
+
+          		Entity best = null;
+          		double bestSq = Double.MAX_VALUE;
+
+          		for (Entity e : mc.world.getEntities()) {
+          			if (!(e instanceof InteractionEntity)) continue;
+          			if (!filter.isEmpty()
+          				&& !e.getName().getString().toLowerCase(Locale.ROOT).contains(filter)) continue;
+
+          			double d = distSqToBox(eye, e.getBoundingBox());
+          			if (d > maxSq || d >= bestSq) continue;
+          			best = e;
+          			bestSq = d;
+          		}
+
+          		if (best != null) {
+          			mc.interactionManager.attackEntity(player, best);
+          			player.swingHand(Hand.MAIN_HAND);
+          			cooldown = Math.max(0, PumpkinMod.kaDelay - 1);
+          		}
+          	}
+
+          	private static double distSqToBox(Vec3d p, Box b) {
+          		double dx = Math.max(Math.max(b.minX - p.x, 0), p.x - b.maxX);
+          		double dy = Math.max(Math.max(b.minY - p.y, 0), p.y - b.maxY);
+          		double dz = Math.max(Math.max(b.minZ - p.z, 0), p.z - b.maxZ);
+          		return dx * dx + dy * dy + dz * dz;
+          	}
+          }
+          EOF_JAVA
+
+          cat > "$PROJ/src/main/java/pl/pumpkin/PumpkinScreen.java" <<'EOF_JAVA'
+          package pl.pumpkin;
+
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.client.gui.widget.SliderWidget;
+          import net.minecraft.client.gui.widget.TextFieldWidget;
+          import net.minecraft.text.Text;
+
+          import java.util.function.Consumer;
+          import java.util.function.DoubleConsumer;
+
+          public class PumpkinScreen extends Screen {
+
+          	private static final int W = 220;
+          	private int labelY1, labelY2;
+
+          	public PumpkinScreen() {
+          		super(Text.literal("Chest SMP Tools"));
+          	}
+
+          	@Override
+          	protected void init() {
+          		int x = this.width / 2 - W / 2;
+          		int y = Math.max(30, this.height / 2 - 112);
+
+          		ButtonWidget trBtn = ButtonWidget.builder(trText(), b -> {
+          			PumpkinMod.tracers = !PumpkinMod.tracers;
+          			b.setMessage(trText());
+          		}).dimensions(x, y, W, 20).build();
+          		addDrawableChild(trBtn);
+          		y += 24;
+
+          		addDrawableChild(new Slider(x, y, W, 20, "Grubość linii", 0.1, 10.0, PumpkinMod.thickness, false,
+          			v -> PumpkinMod.thickness = (float) v));
+          		y += 24;
+
+          		labelY1 = y;
+          		y += 10;
+          		TextFieldWidget nameField = new TextFieldWidget(this.textRenderer, x, y, W, 20, Text.literal("Nazwa armor standa"));
+          		nameField.setMaxLength(64);
+          		nameField.setText(PumpkinMod.targetName);
+          		nameField.setChangedListener((Consumer<String>) s -> PumpkinMod.targetName = s);
+          		addDrawableChild(nameField);
+          		y += 28;
+
+          		ButtonWidget kaBtn = ButtonWidget.builder(kaText(), b -> {
+          			PumpkinMod.killaura = !PumpkinMod.killaura;
+          			b.setMessage(kaText());
+          		}).dimensions(x, y, W, 20).build();
+          		addDrawableChild(kaBtn);
+          		y += 24;
+
+          		addDrawableChild(new Slider(x, y, W, 20, "Zasięg (bloki)", 1.0, 4.0, PumpkinMod.kaRange, false,
+          			v -> PumpkinMod.kaRange = (float) v));
+          		y += 24;
+
+          		addDrawableChild(new Slider(x, y, W, 20, "Opóźnienie (ticki)", 1, 20, PumpkinMod.kaDelay, true,
+          			v -> PumpkinMod.kaDelay = (int) Math.round(v)));
+          		y += 24;
+
+          		labelY2 = y;
+          		y += 10;
+          		TextFieldWidget kaField = new TextFieldWidget(this.textRenderer, x, y, W, 20, Text.literal("Nazwa interaction"));
+          		kaField.setMaxLength(64);
+          		kaField.setText(PumpkinMod.kaName);
+          		kaField.setChangedListener((Consumer<String>) s -> PumpkinMod.kaName = s);
+          		addDrawableChild(kaField);
+          		y += 30;
+
+          		addDrawableChild(ButtonWidget.builder(Text.literal("Gotowe"), b -> close())
+          			.dimensions(x, y, W, 20).build());
+          	}
+
+          	private static Text trText() {
+          		return Text.literal("Tracery: " + (PumpkinMod.tracers ? "§aWŁĄCZONE" : "§cWYŁĄCZONE"));
+          	}
+
+          	private static Text kaText() {
+          		return Text.literal("KillAura (interaction): " + (PumpkinMod.killaura ? "§aWŁĄCZONA" : "§cWYŁĄCZONA"));
+          	}
+
+          	@Override
+          	public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+          		super.render(context, mouseX, mouseY, delta);
+          		int x = this.width / 2 - W / 2;
+          		context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, 12, 0xFFAA00FF);
+          		context.drawTextWithShadow(this.textRenderer, Text.literal("Nazwa armor standa (tracery)"), x, labelY1, 0xFFAAAAAA);
+          		context.drawTextWithShadow(this.textRenderer, Text.literal("Nazwa interaction (puste = każdy)"), x, labelY2, 0xFFAAAAAA);
+          	}
+
+          	@Override
+          	public void close() {
+          		PumpkinMod.saveConfig();
+          		super.close();
+          	}
+
+          	@Override
+          	public boolean shouldPause() {
+          		return false;
+          	}
+
+          	private static class Slider extends SliderWidget {
+          		private final String label;
+          		private final double min, max;
+          		private final boolean whole;
+          		private final DoubleConsumer onChange;
+
+          		Slider(int x, int y, int w, int h, String label, double min, double max, double current,
+          			   boolean whole, DoubleConsumer onChange) {
+          			super(x, y, w, h, Text.empty(), (current - min) / (max - min));
+          			this.label = label;
+          			this.min = min;
+          			this.max = max;
+          			this.whole = whole;
+          			this.onChange = onChange;
+          			updateMessage();
+          		}
+
+          		private double real() {
+          			double v = min + this.value * (max - min);
+          			return whole ? Math.round(v) : Math.round(v * 10.0) / 10.0;
+          		}
+
+          		@Override
+          		protected void updateMessage() {
+          			double v = real();
+          			setMessage(Text.literal(label + ": " + (whole ? String.valueOf((int) v) : String.valueOf(v))));
+          		}
+
+          		@Override
+          		protected void applyValue() {
+          			onChange.accept(real());
+          		}
+          	}
+          }
+          EOF_JAVA
+
+          cat > "$PROJ/src/main/java/pl/pumpkin/TracerRenderer.java" <<'EOF_JAVA'
+          package pl.pumpkin;
+
+          import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
+          import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.font.TextRenderer;
+          import net.minecraft.client.render.Camera;
+          import net.minecraft.client.render.RenderLayer;
+          import net.minecraft.client.render.VertexConsumer;
+          import net.minecraft.client.render.VertexConsumerProvider;
+          import net.minecraft.client.util.math.MatrixStack;
+          import net.minecraft.entity.Entity;
+          import net.minecraft.entity.decoration.ArmorStandEntity;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.math.Vec3d;
+
+          import java.util.Locale;
+
+          public final class TracerRenderer {
+
+          	private static final int R = 170, G = 0, B = 255, A = 255;
+          	private static final int TEXT_COLOR = 0xFFAA00FF;
+
+          	private TracerRenderer() {}
+
+          	public static void init() {
+          		WorldRenderEvents.LAST.register(TracerRenderer::render);
+          	}
+
+          	private static boolean matches(Entity e) {
+          		if (!(e instanceof ArmorStandEntity)) return false;
+          		return e.getName().getString().toLowerCase(Locale.ROOT)
+          			.contains(PumpkinMod.targetName.toLowerCase(Locale.ROOT));
+          	}
+
+          	private static void render(WorldRenderContext context) {
+          		if (!PumpkinMod.tracers) return;
+          		MinecraftClient mc = MinecraftClient.getInstance();
+          		if (mc.world == null || mc.player == null) return;
+
+          		MatrixStack matrices = context.matrixStack();
+          		VertexConsumerProvider consumers = context.consumers();
+          		if (matrices == null || consumers == null) return;
+
+          		Camera camera = context.camera();
+          		Vec3d camPos = camera.getCameraPos();
+          		float tickDelta = context.tickCounter().getTickProgress(false);
+
+          		Vec3d look = Vec3d.fromPolar(camera.getPitch(), camera.getYaw());
+
+          		VertexConsumer lines = consumers.getBuffer(RenderLayer.getLines());
+          		MatrixStack.Entry entry = matrices.peek();
+          		float w = PumpkinMod.thickness;
+
+          		for (Entity e : mc.world.getEntities()) {
+          			if (!matches(e)) continue;
+          			Vec3d p = e.getLerpedPos(tickDelta).add(0, e.getHeight() / 2.0, 0).subtract(camPos);
+          			Vec3d dir = p.subtract(look).normalize();
+
+          			lines.vertex(entry, (float) look.x, (float) look.y, (float) look.z)
+          				.color(R, G, B, A).normal(entry, (float) dir.x, (float) dir.y, (float) dir.z).lineWidth(w);
+          			lines.vertex(entry, (float) p.x, (float) p.y, (float) p.z)
+          				.color(R, G, B, A).normal(entry, (float) dir.x, (float) dir.y, (float) dir.z).lineWidth(w);
+          		}
+
+          		TextRenderer tr = mc.textRenderer;
+          		for (Entity e : mc.world.getEntities()) {
+          			if (!matches(e)) continue;
+          			Vec3d rel = e.getLerpedPos(tickDelta).add(0, e.getHeight() + 0.4, 0).subtract(camPos);
+          			double dist = mc.player.getEntityPos().distanceTo(e.getEntityPos());
+          			Text text = Text.literal(e.getName().getString() + " §7[" + String.format(Locale.ROOT, "%.1f", dist) + "m]");
+
+          			matrices.push();
+          			matrices.translate(rel.x, rel.y, rel.z);
+          			matrices.multiply(camera.getRotation());
+          			float scale = 0.025f * (float) Math.max(1.0, Math.min(5.0, dist / 6.0));
+          			matrices.scale(-scale, -scale, scale);
+          			tr.draw(text, -tr.getWidth(text) / 2.0f, 0, TEXT_COLOR, false,
+          				matrices.peek().getPositionMatrix(), consumers,
+          				TextRenderer.TextLayerType.SEE_THROUGH, 0x66000000, 0xF000F0);
+          			matrices.pop();
+          		}
+          	}
+          }
+          EOF_JAVA
 
       - name: Build
         working-directory: ${{ env.PROJ }}
@@ -38,4 +431,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: chestsmp-tools
-          path: ${{ env.PROJ }}/build/libs/*.jar
+          path: |
+            ${{ env.PROJ }}/build/libs/*.jar
+            !${{ env.PROJ }}/build/libs/*-sources.jar
