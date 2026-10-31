@@ -30,7 +30,7 @@ jobs:
 
       - name: Utworz pliki moda
         run: |
-          mkdir -p "$PROJ/src/main/java/pl/pumpkin" "$PROJ/src/main/resources"
+          mkdir -p "$PROJ/src/main/java/pl/pumpkin" "$PROJ/src/main/resources" "$PROJ/src/main/resources/assets/chestsmp_tools/lang"
 
           cat > "$PROJ/src/main/resources/fabric.mod.json" <<'EOF_MOD'
           {
@@ -52,6 +52,22 @@ jobs:
             }
           }
           EOF_MOD
+
+          cat > "$PROJ/src/main/resources/assets/chestsmp_tools/lang/en_us.json" <<'EOF_LANG'
+          {
+            "key.category.chestsmp_tools.main": "Chest SMP Tools",
+            "key.chestsmp_tools.killaura": "Włącz/wyłącz KillAura",
+            "key.chestsmp_tools.tracers": "Włącz/wyłącz tracery"
+          }
+          EOF_LANG
+
+          cat > "$PROJ/src/main/resources/assets/chestsmp_tools/lang/pl_pl.json" <<'EOF_LANG'
+          {
+            "key.category.chestsmp_tools.main": "Chest SMP Tools",
+            "key.chestsmp_tools.killaura": "Włącz/wyłącz KillAura",
+            "key.chestsmp_tools.tracers": "Włącz/wyłącz tracery"
+          }
+          EOF_LANG
 
           cat > "$PROJ/src/main/java/pl/pumpkin/PumpkinMod.java" <<'EOF_JAVA'
           package pl.pumpkin;
@@ -96,6 +112,8 @@ jobs:
           				})));
 
           		ClientTickEvents.END_CLIENT_TICK.register(KillAura::tick);
+          		Keybinds.init();
+          		ClientTickEvents.END_CLIENT_TICK.register(Keybinds::tick);
           		TracerRenderer.init();
           	}
 
@@ -127,6 +145,53 @@ jobs:
           		try (OutputStream out = Files.newOutputStream(CONFIG)) {
           			p.store(out, "Chest SMP Tools");
           		} catch (IOException ignored) {
+          		}
+          	}
+          }
+          EOF_JAVA
+
+          cat > "$PROJ/src/main/java/pl/pumpkin/Keybinds.java" <<'EOF_JAVA'
+          package pl.pumpkin;
+
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Identifier;
+          import org.lwjgl.glfw.GLFW;
+
+          public final class Keybinds {
+
+          	private static KeyBinding killauraKey;
+          	private static KeyBinding tracersKey;
+
+          	private Keybinds() {}
+
+          	public static void init() {
+          		KeyBinding.Category category = KeyBinding.Category.create(Identifier.of("chestsmp_tools", "main"));
+
+          		killauraKey = KeyBindingHelper.registerKeyBinding(
+          			new KeyBinding("key.chestsmp_tools.killaura", GLFW.GLFW_KEY_K, category));
+          		tracersKey = KeyBindingHelper.registerKeyBinding(
+          			new KeyBinding("key.chestsmp_tools.tracers", GLFW.GLFW_KEY_J, category));
+          	}
+
+          	public static void tick(MinecraftClient mc) {
+          		while (killauraKey.wasPressed()) {
+          			PumpkinMod.killaura = !PumpkinMod.killaura;
+          			PumpkinMod.saveConfig();
+          			say(mc, "KillAura: " + (PumpkinMod.killaura ? "§aWŁĄCZONA" : "§cWYŁĄCZONA"));
+          		}
+          		while (tracersKey.wasPressed()) {
+          			PumpkinMod.tracers = !PumpkinMod.tracers;
+          			PumpkinMod.saveConfig();
+          			say(mc, "Tracery: " + (PumpkinMod.tracers ? "§aWŁĄCZONE" : "§cWYŁĄCZONE"));
+          		}
+          	}
+
+          	private static void say(MinecraftClient mc, String msg) {
+          		if (mc.player != null) {
+          			mc.player.sendMessage(Text.literal(msg), true);
           		}
           	}
           }
@@ -435,33 +500,4 @@ jobs:
 
           			matrices.push();
           			matrices.translate(tp.x, tp.y, tp.z);
-          			matrices.multiply(rot);
-          			float scale = 0.025f * (float) Math.max(1.0, Math.min(5.0, dist / 6.0));
-          			matrices.scale(-scale, -scale, scale);
-          			tr.draw(text, -tr.getWidth(text) / 2.0f, 0, TEXT_COLOR, false,
-          				matrices.peek().getPositionMatrix(), consumers,
-          				TextRenderer.TextLayerType.SEE_THROUGH, 0x66000000, FULL_LIGHT);
-          			matrices.pop();
-          		}
-
-          		matrices.pop();
-          	}
-
-          	private static void vert(VertexConsumer vc, MatrixStack.Entry entry, Vec3d p) {
-          		vc.vertex(entry, (float) p.x, (float) p.y, (float) p.z).color(R, G, B, A).light(FULL_LIGHT);
-          	}
-          }
-          EOF_JAVA
-
-      - name: Build
-        working-directory: ${{ env.PROJ }}
-        run: |
-          if [ -f ./gradlew ]; then chmod +x ./gradlew && ./gradlew build; else gradle build; fi
-
-      - name: Upload jar
-        uses: actions/upload-artifact@v4
-        with:
-          name: chestsmp-tools
-          path: |
-            ${{ env.PROJ }}/build/libs/*.jar
-            !${{ env.PROJ }}/build/libs/*-sources.jar
+          			matrices.multiply(ro
