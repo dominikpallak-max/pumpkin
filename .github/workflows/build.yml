@@ -338,12 +338,11 @@ jobs:
           cat > "$PROJ/src/main/java/pl/pumpkin/TracerRenderer.java" <<'EOF_JAVA'
           package pl.pumpkin;
 
-          import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
-          import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+          import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext;
+          import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
           import net.minecraft.client.MinecraftClient;
           import net.minecraft.client.font.TextRenderer;
-          import net.minecraft.client.render.Camera;
-          import net.minecraft.client.render.RenderLayer;
+          import net.minecraft.client.render.RenderLayers;
           import net.minecraft.client.render.VertexConsumer;
           import net.minecraft.client.render.VertexConsumerProvider;
           import net.minecraft.client.util.math.MatrixStack;
@@ -351,18 +350,24 @@ jobs:
           import net.minecraft.entity.decoration.ArmorStandEntity;
           import net.minecraft.text.Text;
           import net.minecraft.util.math.Vec3d;
+          import org.joml.Quaternionf;
+          import org.joml.Vector3f;
 
+          import java.util.ArrayList;
+          import java.util.List;
           import java.util.Locale;
 
           public final class TracerRenderer {
 
           	private static final int R = 170, G = 0, B = 255, A = 255;
           	private static final int TEXT_COLOR = 0xFFAA00FF;
+          	private static final int FULL_LIGHT = 0xF000F0;
+          	private static final double PIXEL = 0.0013;
 
           	private TracerRenderer() {}
 
           	public static void init() {
-          		WorldRenderEvents.LAST.register(TracerRenderer::render);
+          		WorldRenderEvents.BEFORE_TRANSLUCENT.register(TracerRenderer::render);
           	}
 
           	private static boolean matches(Entity e) {
@@ -376,48 +381,74 @@ jobs:
           		MinecraftClient mc = MinecraftClient.getInstance();
           		if (mc.world == null || mc.player == null) return;
 
-          		MatrixStack matrices = context.matrixStack();
-          		VertexConsumerProvider consumers = context.consumers();
-          		if (matrices == null || consumers == null) return;
+          		float tick = mc.getRenderTickCounter().getTickProgress(false);
 
-          		Camera camera = context.camera();
-          		Vec3d camPos = camera.getCameraPos();
-          		float tickDelta = context.tickCounter().getTickProgress(false);
-
-          		Vec3d look = Vec3d.fromPolar(camera.getPitch(), camera.getYaw());
-
-          		VertexConsumer lines = consumers.getBuffer(RenderLayer.getLines());
-          		MatrixStack.Entry entry = matrices.peek();
-          		float w = PumpkinMod.thickness;
-
+          		List<Entity> targets = new ArrayList<>();
           		for (Entity e : mc.world.getEntities()) {
-          			if (!matches(e)) continue;
-          			Vec3d p = e.getLerpedPos(tickDelta).add(0, e.getHeight() / 2.0, 0).subtract(camPos);
-          			Vec3d dir = p.subtract(look).normalize();
+          			if (matches(e)) targets.add(e);
+          		}
+          		if (targets.isEmpty()) return;
 
-          			lines.vertex(entry, (float) look.x, (float) look.y, (float) look.z)
-          				.color(R, G, B, A).normal(entry, (float) dir.x, (float) dir.y, (float) dir.z).lineWidth(w);
-          			lines.vertex(entry, (float) p.x, (float) p.y, (float) p.z)
-          				.color(R, G, B, A).normal(entry, (float) dir.x, (float) dir.y, (float) dir.z).lineWidth(w);
+          		Vec3d cam = context.worldState().cameraRenderState.pos;
+          		Quaternionf rot = context.worldState().cameraRenderState.orientation;
+          		MatrixStack matrices = context.matrices();
+          		VertexConsumerProvider consumers = context.consumers();
+
+          		Vector3f fwd = new Vector3f(0f, 0f, -1f).rotate(rot);
+          		Vec3d start = cam.add(fwd.x, fwd.y, fwd.z);
+
+          		matrices.push();
+          		matrices.translate(-cam.x, -cam.y, -cam.z);
+
+          		VertexConsumer quads = consumers.getBuffer(RenderLayers.textBackgroundSeeThrough());
+          		MatrixStack.Entry entry = matrices.peek();
+          		double hw1 = 0.5 * PumpkinMod.thickness * PIXEL * start.distanceTo(cam);
+
+          		for (Entity e : targets) {
+          			Vec3d end = e.getLerpedPos(tick).add(0, e.getHeight() / 2.0, 0);
+          			Vec3d dir = end.subtract(start);
+          			Vec3d mid = start.add(end).multiply(0.5);
+
+          			Vec3d side = dir.crossProduct(cam.subtract(mid));
+          			if (side.lengthSquared() < 1.0E-8) side = dir.crossProduct(new Vec3d(0, 1, 0));
+          			if (side.lengthSquared() < 1.0E-8) continue;
+          			side = side.normalize();
+
+          			double hw2 = 0.5 * PumpkinMod.thickness * PIXEL * end.distanceTo(cam);
+
+          			Vec3d a1 = start.add(side.multiply(hw1));
+          			Vec3d a2 = start.subtract(side.multiply(hw1));
+          			Vec3d b1 = end.add(side.multiply(hw2));
+          			Vec3d b2 = end.subtract(side.multiply(hw2));
+
+          			vert(quads, entry, a1); vert(quads, entry, a2); vert(quads, entry, b2); vert(quads, entry, b1);
+          			vert(quads, entry, b1); vert(quads, entry, b2); vert(quads, entry, a2); vert(quads, entry, a1);
           		}
 
           		TextRenderer tr = mc.textRenderer;
-          		for (Entity e : mc.world.getEntities()) {
-          			if (!matches(e)) continue;
-          			Vec3d rel = e.getLerpedPos(tickDelta).add(0, e.getHeight() + 0.4, 0).subtract(camPos);
-          			double dist = mc.player.getEntityPos().distanceTo(e.getEntityPos());
+          		Vec3d me = mc.player.getLerpedPos(tick);
+          		for (Entity e : targets) {
+          			Vec3d ep = e.getLerpedPos(tick);
+          			double dist = me.distanceTo(ep);
+          			Vec3d tp = ep.add(0, e.getHeight() + 0.4, 0);
           			Text text = Text.literal(e.getName().getString() + " §7[" + String.format(Locale.ROOT, "%.1f", dist) + "m]");
 
           			matrices.push();
-          			matrices.translate(rel.x, rel.y, rel.z);
-          			matrices.multiply(camera.getRotation());
+          			matrices.translate(tp.x, tp.y, tp.z);
+          			matrices.multiply(rot);
           			float scale = 0.025f * (float) Math.max(1.0, Math.min(5.0, dist / 6.0));
           			matrices.scale(-scale, -scale, scale);
           			tr.draw(text, -tr.getWidth(text) / 2.0f, 0, TEXT_COLOR, false,
           				matrices.peek().getPositionMatrix(), consumers,
-          				TextRenderer.TextLayerType.SEE_THROUGH, 0x66000000, 0xF000F0);
+          				TextRenderer.TextLayerType.SEE_THROUGH, 0x66000000, FULL_LIGHT);
           			matrices.pop();
           		}
+
+          		matrices.pop();
+          	}
+
+          	private static void vert(VertexConsumer vc, MatrixStack.Entry entry, Vec3d p) {
+          		vc.vertex(entry, (float) p.x, (float) p.y, (float) p.z).color(R, G, B, A).light(FULL_LIGHT);
           	}
           }
           EOF_JAVA
